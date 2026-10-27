@@ -1,0 +1,58 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function normalizedPart(value) {
+      return value.trim().lower().replace('%', '%25').replace('/', '%2F').replace('_', '%5F');
+    }
+
+    function canonicalId(data) {
+      return data.userId + '__' + normalizedPart(data.title) + '__' + normalizedPart(data.author);
+    }
+
+    function validBook(data, documentId) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'author', 'genre', 'status', 'favorite', 'createdAt'])
+        && data.keys().hasOnly(['id', 'userId', 'title', 'author', 'genre', 'status', 'rating', 'favorite', 'notes', 'createdAt'])
+        && data.id == documentId
+        && data.userId == request.auth.uid
+        && data.title is string
+        && data.title.trim().size() > 0
+        && data.title.size() <= 100
+        && data.author is string
+        && data.author.trim().size() > 0
+        && data.author.size() <= 60
+        && data.genre in ['Fiction', 'Non-Fiction', 'Academic', 'Other']
+        && data.status in ['To Read', 'Reading', 'Finished']
+        && data.favorite is bool
+        && data.createdAt is timestamp
+        && (!('rating' in data) || (data.rating is int && data.rating >= 0 && data.rating <= 5))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 300));
+    }
+
+    function canGetBook(bookId) {
+      let bookPath = /databases/$(database)/documents/books/$(bookId);
+      return exists(bookPath)
+        ? resource.data.userId == request.auth.uid
+        : bookId.matches('^' + request.auth.uid + '__.*$');
+    }
+
+    match /books/{bookId} {
+      allow get: if signedIn() && canGetBook(bookId);
+      allow list: if signedIn() && resource.data.userId == request.auth.uid;
+      allow create: if signedIn()
+        && validBook(request.resource.data, bookId)
+        && bookId == canonicalId(request.resource.data);
+      allow update: if signedIn()
+        && resource.data.userId == request.auth.uid
+        && validBook(request.resource.data, bookId)
+        && bookId == canonicalId(request.resource.data)
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
+    }
+  }
+}

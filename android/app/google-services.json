@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "119073763823",
+    "project_id": "bookshelf-practical-exam-1027",
+    "storage_bucket": "bookshelf-practical-exam-1027.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:119073763823:android:4ce88160eca5d72c49461a",
+        "android_client_info": {
+          "package_name": "com.example.bookshelf"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCuE085WwjiEmdu_SRhXJMxoshMSC5KYXw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
