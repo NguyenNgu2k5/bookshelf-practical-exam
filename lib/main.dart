@@ -658,6 +658,7 @@ class _BookListScreen extends StatefulWidget {
 
 class _BookListScreenState extends State<_BookListScreen> {
   late final _BookStore _store = _BookStore(widget.user.uid);
+  late final Stream<List<Book>> _books = _store.watchBooks();
   final _search = TextEditingController();
   String _genre = 'All';
   String _status = 'All';
@@ -732,7 +733,7 @@ class _BookListScreenState extends State<_BookListScreen> {
       ),
       body: SafeArea(
         child: StreamBuilder<List<Book>>(
-          stream: _store.watchBooks(),
+          stream: _books,
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
               return const Center(child: CircularProgressIndicator());
