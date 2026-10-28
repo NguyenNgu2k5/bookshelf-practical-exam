@@ -334,6 +334,7 @@ class _AuthScreenState extends State<_AuthScreen> {
   }
 
   Future<void> _submit() async {
+    if (_busy) return;
     setState(() {
       _submitted = true;
       _error = null;
@@ -580,8 +581,8 @@ String _normalizedPart(String value) => value
 String _bookId(String uid, String title, String author) =>
     '${uid}__${_normalizedPart(title)}__${_normalizedPart(author)}';
 
-class _BookStore {
-  _BookStore(this.uid);
+class BookStore {
+  BookStore(this.uid);
 
   final String uid;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -611,26 +612,28 @@ class _BookStore {
 
   Future<String> update(Book original, BookDraft draft) async {
     final id = _bookId(uid, draft.title, draft.author);
-    final data = draft.toMap(
-      id: id,
-      uid: uid,
-      createdAt: original.createdAt,
-      favorite: original.favorite,
-    );
     final oldReference = _books.doc(original.id);
-    if (id == original.id) {
-      await oldReference.set(data);
-      return id;
-    }
-
     final newReference = _books.doc(id);
-    final updated = await _db.runTransaction((transaction) async {
-      final existing = await transaction.get(newReference);
-      if (existing.exists) return false;
-      transaction.set(newReference, data);
-      transaction.delete(oldReference);
+    final updated = await _db.runTransaction<bool?>((transaction) async {
+      final current = await transaction.get(oldReference);
+      if (!current.exists) return null;
+      if (id != original.id) {
+        final existing = await transaction.get(newReference);
+        if (existing.exists) return false;
+      }
+      transaction.set(
+        newReference,
+        draft.toMap(
+          id: id,
+          uid: uid,
+          createdAt: current.data()!['createdAt'],
+          favorite: current.data()!['favorite'] as bool,
+        ),
+      );
+      if (id != original.id) transaction.delete(oldReference);
       return true;
     });
+    if (updated == null) throw StateError('This book no longer exists');
     if (!updated) throw _DuplicateBookException();
     return id;
   }
@@ -639,7 +642,6 @@ class _BookStore {
       _books.doc(book.id).update({'favorite': favorite});
 
   Future<void> delete(Book book) => _books.doc(book.id).delete();
-
 }
 
 class _DuplicateBookException implements Exception {
@@ -657,7 +659,7 @@ class _BookListScreen extends StatefulWidget {
 }
 
 class _BookListScreenState extends State<_BookListScreen> {
-  late final _BookStore _store = _BookStore(widget.user.uid);
+  late final BookStore _store = BookStore(widget.user.uid);
   late final Stream<List<Book>> _books = _store.watchBooks();
   final _search = TextEditingController();
   String _genre = 'All';
@@ -1039,7 +1041,7 @@ class _Tag extends StatelessWidget {
 class _AddBookScreen extends StatelessWidget {
   const _AddBookScreen({required this.store});
 
-  final _BookStore store;
+  final BookStore store;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -1317,7 +1319,7 @@ class _BookFormState extends State<_BookForm> {
 class _DetailScreen extends StatefulWidget {
   const _DetailScreen({required this.store, required this.book});
 
-  final _BookStore store;
+  final BookStore store;
   final Book book;
 
   @override
@@ -1327,7 +1329,25 @@ class _DetailScreen extends StatefulWidget {
 class _DetailScreenState extends State<_DetailScreen> {
   late String _docId = widget.book.id;
   bool _editing = false;
+  bool _saving = false;
+  Book? _editBook;
   final _editFormKey = GlobalKey<_BookFormState>();
+
+  Future<String> _saveBook(BookDraft draft) async {
+    setState(() => _saving = true);
+    try {
+      final id = await widget.store.update(_editBook!, draft);
+      if (mounted) {
+        setState(() {
+          _docId = id;
+          _editing = false;
+        });
+      }
+      return id;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
 
   Future<void> _toggleFavorite(Book book) async {
     try {
@@ -1379,135 +1399,152 @@ class _DetailScreenState extends State<_DetailScreen> {
     final reference = FirebaseFirestore.instance
         .collection('books')
         .doc(_docId);
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Detail'),
-        actions: [
-          if (_editing) ...[
-            TextButton(
-              onPressed: () => setState(() => _editing = false),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => _editFormKey.currentState?.submit(),
-              child: const Text('Save'),
-            ),
-            const SizedBox(width: 8),
+    return PopScope(
+      canPop: !_saving,
+      child: Scaffold(
+        appBar: AppBar(
+          automaticallyImplyLeading: !_saving,
+          title: const Text('Detail'),
+          actions: [
+            if (_editing) ...[
+              TextButton(
+                onPressed: _saving
+                    ? null
+                    : () => setState(() => _editing = false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: _saving
+                    ? null
+                    : () => _editFormKey.currentState?.submit(),
+                child: const Text('Save'),
+              ),
+              const SizedBox(width: 8),
+            ],
           ],
-        ],
-      ),
-      body: SafeArea(
-        child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          stream: reference.snapshots(),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (snapshot.hasError) {
-              return Center(
-                child: Text('Could not load book: ${snapshot.error}'),
-              );
-            }
-            final data = snapshot.data?.data();
-            if (data == null) {
-              return const Center(child: Text('No books found'));
-            }
-            final book = _bookFromData(snapshot.data!.id, data);
-            if (_editing) {
-              return SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 560),
-                    child: _BookForm(
-                      key: _editFormKey,
-                      initial: book,
-                      showSubmitButton: false,
-                      onSave: (draft) => widget.store.update(book, draft),
-                      onSaved: (id) => setState(() {
-                        _docId = id;
-                        _editing = false;
-                      }),
-                    ),
-                  ),
-                ),
-              );
-            }
-            return SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 560),
-                  child: Card(
-                    color: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(22),
-                      side: const BorderSide(color: Color(0xFFE8E7E0)),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(22),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Text(
-                            book.title,
-                            style: Theme.of(context).textTheme.headlineMedium,
-                          ),
-                          const SizedBox(height: 5),
-                          Text(book.author),
-                          const SizedBox(height: 22),
-                          _DetailRow(label: 'Genre', value: book.genre),
-                          _DetailRow(label: 'Status', value: book.status),
-                          _DetailRow(
-                            label: 'Rating',
-                            value: book.rating?.toString() ?? 'Not rated',
-                          ),
-                          _DetailRow(
-                            label: 'Notes',
-                            value: book.notes.isEmpty ? '—' : book.notes,
-                          ),
-                          const SizedBox(height: 17),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  onPressed: () => _toggleFavorite(book),
-                                  icon: Icon(
-                                    book.favorite
-                                        ? Icons.star_rounded
-                                        : Icons.star_border_rounded,
-                                  ),
-                                  label: Text(
-                                    book.favorite ? 'Favorite' : 'Add favorite',
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  onPressed: () => _delete(book),
-                                  icon: const Icon(
-                                    Icons.delete_outline_rounded,
-                                  ),
-                                  label: const Text('Delete'),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          FilledButton.tonal(
-                            onPressed: () => setState(() => _editing = true),
-                            child: const Text('Edit'),
-                          ),
-                        ],
+        ),
+        body: SafeArea(
+          child: _editing
+              ? SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 560),
+                      child: _BookForm(
+                        key: _editFormKey,
+                        initial: _editBook!,
+                        showSubmitButton: false,
+                        onSave: _saveBook,
                       ),
                     ),
                   ),
+                )
+              : StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                  stream: reference.snapshots(),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    if (snapshot.hasError) {
+                      return Center(
+                        child: Text('Could not load book: ${snapshot.error}'),
+                      );
+                    }
+                    final data = snapshot.data?.data();
+                    if (data == null) {
+                      return const Center(child: Text('No books found'));
+                    }
+                    final book = _bookFromData(snapshot.data!.id, data);
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
+                      child: Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 560),
+                          child: Card(
+                            color: Colors.white,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(22),
+                              side: const BorderSide(color: Color(0xFFE8E7E0)),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(22),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Text(
+                                    book.title,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .headlineMedium,
+                                  ),
+                                  const SizedBox(height: 5),
+                                  Text(book.author),
+                                  const SizedBox(height: 22),
+                                  _DetailRow(label: 'Genre', value: book.genre),
+                                  _DetailRow(
+                                    label: 'Status',
+                                    value: book.status,
+                                  ),
+                                  _DetailRow(
+                                    label: 'Rating',
+                                    value:
+                                        book.rating?.toString() ?? 'Not rated',
+                                  ),
+                                  _DetailRow(
+                                    label: 'Notes',
+                                    value: book.notes.isEmpty
+                                        ? '—'
+                                        : book.notes,
+                                  ),
+                                  const SizedBox(height: 17),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: OutlinedButton.icon(
+                                          onPressed: () =>
+                                              _toggleFavorite(book),
+                                          icon: Icon(
+                                            book.favorite
+                                                ? Icons.star_rounded
+                                                : Icons.star_border_rounded,
+                                          ),
+                                          label: Text(
+                                            book.favorite
+                                                ? 'Favorite'
+                                                : 'Add favorite',
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: OutlinedButton.icon(
+                                          onPressed: () => _delete(book),
+                                          icon: const Icon(
+                                            Icons.delete_outline_rounded,
+                                          ),
+                                          label: const Text('Delete'),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
+                                  FilledButton.tonal(
+                                    onPressed: () => setState(() {
+                                      _editBook = book;
+                                      _editing = true;
+                                    }),
+                                    child: const Text('Edit'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 ),
-              ),
-            );
-          },
         ),
       ),
     );
